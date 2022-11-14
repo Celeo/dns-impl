@@ -1,13 +1,14 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use itertools::Itertools;
-use log::{debug, error, info};
+use log::{debug, error};
 use std::env;
 use tokio::net::UdpSocket;
 
 const LOCAL_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_LOCAL_PORT: u32 = 8043;
-const REMOTE_ADDRESS: &str = "8.8.8.8:53";
+const DEFAULT_REMOTE_ADDRESS: &str = "8.8.8.8";
+const REMOTE_ADDRESS_PORT: u32 = 53;
 const HEADER: &str = "AAAA01000001000000000000";
 
 /// Simple DNS lookup.
@@ -17,7 +18,7 @@ struct Args {
     /// Domain to resolve
     address: String,
 
-    /// DNS server to use (defaults to Google)
+    /// DNS server to use (defaults to Google's 8.8.8.8)
     #[arg(short, long)]
     server: Option<String>,
 
@@ -45,7 +46,7 @@ fn build_question(address: &str) -> String {
 /// Submit the query to the DNS server over UDP.
 async fn submit_query(query: &[u8], server: &str, port: u32) -> Result<String> {
     let socket = UdpSocket::bind(format!("{}:{}", LOCAL_ADDRESS, port)).await?;
-    socket.connect(REMOTE_ADDRESS).await?;
+    socket.connect(server).await?;
 
     let written = socket.send_to(query, server).await?;
     debug!("Wrote {} bytes", written);
@@ -91,9 +92,15 @@ async fn main() -> Result<()> {
     }
     pretty_env_logger::init();
 
+    let remote = format!(
+        "{}:{}",
+        args.server
+            .unwrap_or_else(|| DEFAULT_REMOTE_ADDRESS.to_string()),
+        REMOTE_ADDRESS_PORT
+    );
     let res = resolve_address(
         &args.address,
-        &args.server.unwrap_or_else(|| REMOTE_ADDRESS.to_string()),
+        &remote,
         args.port.unwrap_or(DEFAULT_LOCAL_PORT),
     )
     .await;
