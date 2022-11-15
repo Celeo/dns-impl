@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use itertools::Itertools;
-use log::{debug, error};
-use std::env;
+use log::{debug, error, info, LevelFilter};
 use tokio::net::UdpSocket;
 
 const LOCAL_ADDRESS: &str = "0.0.0.0";
@@ -10,6 +9,8 @@ const DEFAULT_LOCAL_PORT: u32 = 8043;
 const DEFAULT_REMOTE_ADDRESS: &str = "8.8.8.8";
 const REMOTE_ADDRESS_PORT: u32 = 53;
 const HEADER: &str = "AAAA01000001000000000000";
+
+// TODO: local cache supporting TTL
 
 /// Simple DNS lookup.
 #[derive(Parser, Debug)]
@@ -49,7 +50,7 @@ async fn submit_query(query: &[u8], server: &str, port: u32) -> Result<String> {
     socket.connect(server).await?;
 
     let written = socket.send_to(query, server).await?;
-    debug!("Wrote {} bytes", written);
+    debug!("Wrote {written} bytes");
 
     let mut buffer = [0u8; 4096];
     let read = socket.recv(&mut buffer).await?;
@@ -57,40 +58,61 @@ async fn submit_query(query: &[u8], server: &str, port: u32) -> Result<String> {
         return Err(anyhow!("Did not read back any data"));
     }
 
-    debug!("Read {} bytes", read);
-    Ok(hex::encode_upper(&buffer[..read])
-        .chars()
-        .chunks(2)
-        .into_iter()
-        .map(|s| s.map(|e| e.to_string()).collect::<Vec<String>>().join(""))
-        .join(" "))
+    debug!("Read {read} bytes");
+    Ok(hex::encode_upper(&buffer[..read]))
 }
 
 /// Parse the response from the DNS server into an IP address.
-fn parse_response(response: &str) -> Result<String> {
-    // TODO
+fn parse_response(response: &str) -> String {
+    let _id: String = response.chars().take(4).collect();
+    let _flags: String = response.chars().skip(4).take(4).collect();
 
-    unimplemented!()
+    let body: String = response.chars().skip(24).collect();
+    debug!("Response body: {body}");
+    body[body.len() - 8..]
+        .chars()
+        .chunks(2)
+        .into_iter()
+        .map(|mut chunk| chunk.join(""))
+        .flat_map(|str| hex::decode(str).expect("Received invalid hex code"))
+        .map(|oct| oct.to_string())
+        .join(".")
 }
 
 /// Resolve a domain to an IP.
 pub async fn resolve_address(address: &str, server: &str, port: u32) -> Result<String> {
     let query = hex::decode(format!("{}{}", HEADER, build_question(address)))?;
     let response = submit_query(&query, server, port).await?;
-    let ip = parse_response(&response)?;
+    let ip = parse_response(&response);
     Ok(ip)
+}
+
+/// Configure the logger.
+///
+/// Info logs are just the message; other logs include the log level.
+fn setup_logger(debug: bool) -> Result<(), fern::InitError> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            if record.level() == LevelFilter::Info {
+                out.finish(format_args!("{}", message))
+            } else {
+                out.finish(format_args!("[{}] {}", record.level(), message))
+            }
+        })
+        .level(if debug {
+            LevelFilter::Debug
+        } else {
+            LevelFilter::Info
+        })
+        .chain(std::io::stdout())
+        .apply()?;
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-
-    if args.debug {
-        env::set_var("RUST_LOG", "debug");
-    } else if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "info");
-    }
-    pretty_env_logger::init();
+    setup_logger(args.debug)?;
 
     let remote = format!(
         "{}:{}",
@@ -98,14 +120,16 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| DEFAULT_REMOTE_ADDRESS.to_string()),
         REMOTE_ADDRESS_PORT
     );
-    let res = resolve_address(
+
+    match resolve_address(
         &args.address,
         &remote,
         args.port.unwrap_or(DEFAULT_LOCAL_PORT),
     )
-    .await;
-    if let Err(e) = res {
-        error!("{}", e);
+    .await
+    {
+        Ok(ip) => info!("{ip}"),
+        Err(e) => error!("Processing error: {e}"),
     }
 
     Ok(())
@@ -113,13 +137,21 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_question;
+    use super::{build_question, parse_response};
 
     #[test]
     fn test_address_to_hex() {
         assert_eq!(
             build_question("example.com"),
             "076578616D706C6503636F6D0000010001"
+        );
+    }
+
+    #[test]
+    fn test_parse_response() {
+        assert_eq!(
+            parse_response("076578616D706C6503636F6D0000010001C00C0001000100004CDB00045DB8D822"),
+            "93.184.216.34"
         );
     }
 }
