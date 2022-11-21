@@ -64,8 +64,8 @@ async fn submit_query(query: &[u8], server: &str, port: u32) -> Result<String> {
 
 /// Parse the response from the DNS server into an IP address.
 fn parse_response(response: &str) -> String {
-    let _id: String = response.chars().take(4).collect();
-    let _flags: String = response.chars().skip(4).take(4).collect();
+    let header: String = response.chars().take(24).collect();
+    debug!("Response header: {header}");
 
     let body: String = response.chars().skip(24).collect();
     debug!("Response body: {body}");
