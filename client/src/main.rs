@@ -93,24 +93,28 @@ async fn submit_tcp(query: &[u8], server: &str) -> Result<String> {
 }
 
 /// Parse the response from the DNS server into an IP address.
-fn parse_response(response: &str) -> String {
+fn parse_response(response: &str) -> (String, u64) {
     let header: String = response.chars().take(24).collect();
     debug!("Response header: {header}");
 
     let body: String = response.chars().skip(24).collect();
     debug!("Response body: {body}");
-    body[body.len() - 8..]
+    let ip = body[body.len() - 8..]
         .chars()
         .chunks(2)
         .into_iter()
         .map(|mut chunk| chunk.join(""))
         .flat_map(|str| hex::decode(str).expect("Received invalid hex code"))
         .map(|oct| oct.to_string())
-        .join(".")
+        .join(".");
+
+    // TODO parse TTL
+
+    (ip, 0)
 }
 
 /// Resolve a domain to an IP.
-async fn resolve_address(address: &str, server: &str, mode: &Mode) -> Result<String> {
+async fn resolve_address(address: &str, server: &str, mode: &Mode) -> Result<(String, u64)> {
     let query = hex::decode(format!("{}{}", HEADER, build_question(address)))?;
     debug!("Query: {:?}", query);
 
@@ -119,8 +123,7 @@ async fn resolve_address(address: &str, server: &str, mode: &Mode) -> Result<Str
         Mode::TCP => submit_tcp(&query, server).await?,
     };
 
-    let ip = parse_response(&response);
-    Ok(ip)
+    Ok(parse_response(&response))
 }
 
 /// Configure the logger.
@@ -163,7 +166,7 @@ async fn main() -> Result<()> {
     };
 
     match resolve_address(&args.address, &remote, &mode).await {
-        Ok(ip) => info!("{ip}"),
+        Ok((ip, _ttl)) => info!("{ip}"),
         Err(e) => error!("Processing error: {e}"),
     }
 
@@ -185,7 +188,7 @@ mod tests {
     #[test]
     fn test_parse_response() {
         assert_eq!(
-            parse_response("076578616D706C6503636F6D0000010001C00C0001000100004CDB00045DB8D822"),
+            parse_response("076578616D706C6503636F6D0000010001C00C0001000100004CDB00045DB8D822").0,
             "93.184.216.34"
         );
     }
