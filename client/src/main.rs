@@ -1,16 +1,27 @@
 use anyhow::{anyhow, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use itertools::Itertools;
 use log::{debug, error, info, LevelFilter};
-use tokio::net::UdpSocket;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
+};
 
 const LOCAL_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_LOCAL_PORT: u32 = 8043;
-const DEFAULT_REMOTE_ADDRESS: &str = "8.8.8.8";
+const DEFAULT_REMOTE_ADDRESS: &str = "8.8.4.4";
 const REMOTE_ADDRESS_PORT: u32 = 53;
 const HEADER: &str = "AAAA01000001000000000000";
 
 // TODO: local cache supporting TTL
+
+/// Network transmission mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[allow(clippy::upper_case_acronyms)]
+enum Mode {
+    UDP,
+    TCP,
+}
 
 /// Simple DNS lookup.
 #[derive(Parser, Debug)]
@@ -19,7 +30,11 @@ struct Args {
     /// Domain to resolve
     address: String,
 
-    /// DNS server to use (defaults to Google's 8.8.8.8)
+    /// Which mode to use (defaults to UDP)
+    #[arg(short, long, value_enum)]
+    mode: Option<Mode>,
+
+    /// DNS server to use (defaults to Google's secondary 8.8.4.4)
     #[arg(short, long)]
     server: Option<String>,
 
@@ -45,8 +60,8 @@ fn build_question(address: &str) -> String {
 }
 
 /// Submit the query to the DNS server over UDP.
-async fn submit_query(query: &[u8], server: &str, port: u32) -> Result<String> {
-    let socket = UdpSocket::bind(format!("{}:{}", LOCAL_ADDRESS, port)).await?;
+async fn submit_udp(query: &[u8], server: &str, local_port: u32) -> Result<String> {
+    let socket = UdpSocket::bind(format!("{}:{}", LOCAL_ADDRESS, local_port)).await?;
     socket.connect(server).await?;
 
     let written = socket.send_to(query, server).await?;
@@ -60,6 +75,21 @@ async fn submit_query(query: &[u8], server: &str, port: u32) -> Result<String> {
 
     debug!("Read {read} bytes");
     Ok(hex::encode_upper(&buffer[..read]))
+}
+
+/// Submit the query to the DNS server over TCP.
+async fn submit_tcp(query: &[u8], server: &str) -> Result<String> {
+    let mut stream = TcpStream::connect(server).await?;
+    stream.write_u16(query.len() as u16).await?;
+    stream.write_all(query).await?;
+
+    let response_length = stream.read_u16().await? as usize;
+    let mut buffer = Vec::with_capacity(response_length);
+    stream.read_buf(&mut buffer).await?;
+    assert_eq!(buffer.len(), response_length);
+
+    debug!("Read {response_length} bytes");
+    Ok(hex::encode_upper(&buffer))
 }
 
 /// Parse the response from the DNS server into an IP address.
@@ -80,9 +110,15 @@ fn parse_response(response: &str) -> String {
 }
 
 /// Resolve a domain to an IP.
-pub async fn resolve_address(address: &str, server: &str, port: u32) -> Result<String> {
+async fn resolve_address(address: &str, server: &str, mode: &Mode) -> Result<String> {
     let query = hex::decode(format!("{}{}", HEADER, build_question(address)))?;
-    let response = submit_query(&query, server, port).await?;
+    debug!("Query: {:?}", query);
+
+    let response = match mode {
+        Mode::UDP => submit_udp(&query, server, DEFAULT_LOCAL_PORT).await?,
+        Mode::TCP => submit_tcp(&query, server).await?,
+    };
+
     let ip = parse_response(&response);
     Ok(ip)
 }
@@ -109,7 +145,7 @@ fn setup_logger(debug: bool) -> Result<(), fern::InitError> {
     Ok(())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
     setup_logger(args.debug)?;
@@ -121,13 +157,12 @@ async fn main() -> Result<()> {
         REMOTE_ADDRESS_PORT
     );
 
-    match resolve_address(
-        &args.address,
-        &remote,
-        args.port.unwrap_or(DEFAULT_LOCAL_PORT),
-    )
-    .await
-    {
+    let mode = match args.mode {
+        Some(m) => m,
+        None => Mode::UDP,
+    };
+
+    match resolve_address(&args.address, &remote, &mode).await {
         Ok(ip) => info!("{ip}"),
         Err(e) => error!("Processing error: {e}"),
     }
